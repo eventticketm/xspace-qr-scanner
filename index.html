@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#081321"><title>XSpace · QR Scanner</title>
+<link rel="stylesheet" href="styles.css">
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js" defer></script>
+<script src="config.js"></script><script src="app.js" defer></script>
+</head><body><main class="shell">
+<header><div class="mark">XSPACE · EVENT CONTROL</div><h1>QR Scanner</h1><p class="muted">Dedicated entry and exit validation</p></header>
+<section id="login-panel" class="panel"><h2>Staff sign in</h2>
+<label for="email">Staff email</label><input id="email" type="email" autocomplete="username" placeholder="name@example.com">
+<label for="pin">Staff PIN</label><input id="pin" type="password" autocomplete="current-password" placeholder="Enter your PIN">
+<button id="login-button">Sign in</button><p id="login-error" class="notice error" hidden></p></section>
+<section id="scanner-panel" class="panel" hidden>
+<div class="userline"><span>Signed in: <b id="staff-name"></b></span><button id="logout-button" class="text-button">Sign out</button></div>
+<div id="role-box" class="notice"></div>
+<button id="start-button" class="primary">Enable camera &amp; start scanner</button>
+<button id="stop-button" class="danger" hidden>Stop camera</button>
+<div id="reader" aria-label="QR camera view"></div>
+<div id="scan-result" class="notice" role="status" aria-live="polite">Camera is off. Press the button to request camera permission.</div>
+<details><summary>Camera not working?</summary><p class="muted">Allow camera access for this website in your browser's site settings. Use manual QR entry as a backup.</p></details>
+<label for="manual-qr">Manual QR value</label><input id="manual-qr" autocomplete="off" placeholder="Enter or paste QR value">
+<button id="manual-button" class="secondary">Submit manual scan</button>
+</section><footer>Only authorised Entry and Exit staff can use this scanner.</footer>
+</main></body></html>
