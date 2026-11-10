@@ -18,7 +18,24 @@ function doPost(e) {
     var data = request.data || {};
 
     if (action === 'login') {
-      var result = login(data.email, data.pin);
+      var email = String(data.email || '').trim().toLowerCase();
+      var pin = String(data.pin || '');
+      if (!email || email.length > 180 || !pin || pin.length > 100) {
+        throw new Error('Enter a valid staff email and PIN.');
+      }
+      // Limit repeated failed PIN attempts per email for five minutes.
+      var cache = CacheService.getScriptCache();
+      var attemptKey = 'xspace_bridge_login_' + hash_(email, 'xspace-login-window').slice(0, 32);
+      var attempts = Number(cache.get(attemptKey) || 0);
+      if (attempts >= 8) throw new Error('Too many failed attempts. Wait five minutes and try again.');
+      var result;
+      try {
+        result = login(email, pin);
+        cache.remove(attemptKey);
+      } catch (loginError) {
+        cache.put(attemptKey, String(attempts + 1), 300);
+        throw loginError;
+      }
       if (result.role !== 'ENTRY' && result.role !== 'EXIT') {
         logout(result.token);
         throw new Error('This scanner is for Entry and Exit staff accounts only. Use the Admin website for administration.');
