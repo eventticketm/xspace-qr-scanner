@@ -1,5 +1,7 @@
-// Existing XSpace Apps Script web app deployment.
-// Keep the URL ending in /exec; do not append ?page=scanner.
+// Public Supabase project settings only.
+// Paste your Project URL and anon/publishable key here after Supabase setup.
+// NEVER put a service_role or secret key in this file.
 window.XSPACE_CONFIG = {
-  APPS_SCRIPT_WEB_APP_URL: "https://script.google.com/macros/s/AKfycbzZNBGgLPwOhvFvIOJpA_0K_-BE96PAsbGp_I8RGtfC6ldMP02ONjSHKxs-n3ekjtog/exec"
+  SUPABASE_URL: "YOUR_SUPABASE_PROJECT_URL",
+  SUPABASE_ANON_KEY: "YOUR_SUPABASE_ANON_OR_PUBLISHABLE_KEY"
 };
