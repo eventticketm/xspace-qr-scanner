@@ -1,119 +1,66 @@
-const $ = id => document.getElementById(id);
-let session = null, qr = null, cameraOn = false, scanBusy = false, lastCode = "", lastAt = 0, cameras = [];
-const backend = (window.XSPACE_CONFIG && window.XSPACE_CONFIG.APPS_SCRIPT_WEB_APP_URL || "").trim();
-
-function showError(message){$("login-error").textContent=message;$("login-error").hidden=false;}
-function setStatus(message,kind=""){const el=$("scan-result");el.textContent=message;el.className="notice "+kind;}
-
-function bridgeRequest(action, data={}) {
-  if (!backend) return Promise.reject(new Error("Apps Script URL is missing from config.js."));
-  const requestId = (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(16)+"-"+Math.random().toString(16).slice(2)+"-"+Math.random().toString(16).slice(2));
-  return new Promise((resolve,reject)=>{
-    const frame=document.createElement("iframe");
-    frame.name="xspace_bridge_"+requestId;
-    frame.title="XSpace secure scanner connection";
-    frame.style.cssText="position:absolute;width:1px;height:1px;left:-10000px;border:0";
-    const form=document.createElement("form");
-    form.method="POST";form.action=backend;form.target=frame.name;form.style.display="none";
-    const field=document.createElement("input");
-    field.type="hidden";field.name="xspace_request";
-    field.value=JSON.stringify({requestId,action,data});form.appendChild(field);
-    let finished=false;
-    const cleanup=()=>{window.removeEventListener("message",onMessage);form.remove();setTimeout(()=>frame.remove(),250);};
-    const finish=(fn,value)=>{if(finished)return;finished=true;clearTimeout(timer);cleanup();fn(value);};
-    const onMessage=(event)=>{
-      if(event.origin!=="https://script.google.com" && event.origin!=="https://script.googleusercontent.com" && !event.origin.endsWith(".googleusercontent.com")) return;
-      const msg=event.data;
-      if(!msg || msg.type!=="xspace-scanner-response" || msg.requestId!==requestId)return;
-      const res=msg.response||{};if(res.ok)finish(resolve,res.data);else finish(reject,new Error(res.error||"Scanner request failed."));
-    };
-    const timer=setTimeout(()=>finish(reject,new Error("The connection to XSpace timed out. Check your internet connection and Apps Script deployment.")),25000);
-    window.addEventListener("message",onMessage);document.body.append(frame,form);
-    try{form.submit();}catch(error){finish(reject,error);}
-  });
-}
-
+const $=id=>document.getElementById(id);
+let supabase=null, user=null, profile=null, scanner=null, cameras=[], cameraOn=false, scanBusy=false, lastValue="", lastAt=0;
+const cfg=window.XSPACE_CONFIG||{};
+const configured=cfg.SUPABASE_URL&&cfg.SUPABASE_ANON_KEY&&!cfg.SUPABASE_URL.includes("YOUR_")&&!cfg.SUPABASE_ANON_KEY.includes("YOUR_");
+if(!configured){$("config-warning").hidden=false;$("login-button").disabled=true;}
+else if(window.supabase?.createClient){supabase=window.supabase.createClient(cfg.SUPABASE_URL,cfg.SUPABASE_ANON_KEY);}
+function message(id,text,kind=""){const el=$(id);el.textContent=text;el.className="notice "+kind;el.hidden=false;}
+function hidePanels(){$("login-panel").hidden=true;$("admin-panel").hidden=true;$("staff-panel").hidden=true;}
 async function signIn(){
-  $("login-error").hidden=true;$("login-button").disabled=true;
-  try{
-    const user=await bridgeRequest("login",{email:$("email").value.trim(),pin:$("pin").value});
-    if(!user || !["ENTRY","EXIT"].includes(user.role))throw new Error("This scanner is for Entry and Exit staff only.");
-    session=user;sessionStorage.setItem("xspaceScannerSession",JSON.stringify(user));renderSession();$("pin").value="";
-  }catch(e){showError(e.message||String(e));}
-  finally{$("login-button").disabled=false;}
+ $("login-button").disabled=true;$("login-error").hidden=true;
+ try{
+  const {data,error}=await supabase.auth.signInWithPassword({email:$("email").value.trim(),password:$("password").value});
+  if(error)throw error;user=data.user;
+  const p=await supabase.rpc("current_staff_profile");if(p.error)throw p.error;profile=p.data;
+  hidePanels();
+  if(profile.role==="ADMIN"){ $("admin-panel").hidden=false;$("admin-welcome").textContent=profile.full_name+" · ADMIN";await loadAdmin();}
+  else if(profile.role==="ENTRY"||profile.role==="EXIT"){ $("staff-panel").hidden=false;$("staff-welcome").textContent=profile.full_name+" · "+profile.role;$("role-banner").textContent=profile.role==="ENTRY"?"ENTRY MODE — authorised scans mark tickets INSIDE.":"EXIT MODE — authorised scans mark tickets OUTSIDE.";}
+  else throw new Error("This account has no permitted XSpace role.");
+ }catch(e){await supabase.auth.signOut();$("login-panel").hidden=false;message("login-error",e.message||"Sign-in failed.","error");}
+ finally{$("login-button").disabled=false;$("password").value="";}
 }
-function renderSession(){
-  $("login-panel").hidden=true;$("scanner-panel").hidden=false;
-  $("staff-name").textContent=(session.name||session.email)+" · "+session.role;
-  $("role-box").textContent=session.role==="ENTRY"?"ENTRY MODE — accepted tickets are marked inside.":"EXIT MODE — accepted tickets are marked outside.";
+async function signOut(){await stopCamera();await supabase.auth.signOut();user=null;profile=null;hidePanels();$("login-panel").hidden=false;}
+async function loadAdmin(){
+ $("refresh-admin").disabled=true;
+ try{
+  const [summary,tickets,history]=await Promise.all([
+   supabase.rpc("admin_dashboard_summary"),supabase.rpc("admin_ticket_list",{p_limit:300}),supabase.rpc("admin_recent_scan_history",{p_limit:100})
+  ]);
+  for(const r of [summary,tickets,history])if(r.error)throw r.error;
+  const s=summary.data||{};
+  $("stats").innerHTML=[["Tickets",s.total_tickets],["Inside",s.inside],["Outside",s.outside],["Accepted scans",s.accepted_scans],["Rejected scans",s.rejected_scans],["Active staff",s.active_staff]].map(([k,v])=>'<div class="stat"><b>'+Number(v||0)+'</b><span>'+k+'</span></div>').join("");
+  $("ticket-rows").innerHTML=(tickets.data||[]).map(t=>'<tr><td>'+esc(t.ticket_id)+'</td><td>'+esc(t.status)+'</td><td>'+date(t.updated_at)+'</td></tr>').join("")||'<tr><td colspan="3">No tickets imported yet.</td></tr>';
+  $("history-rows").innerHTML=(history.data||[]).map(h=>'<tr><td>'+date(h.scanned_at)+'</td><td>'+esc(h.ticket_id||"—")+'</td><td>'+esc(h.action)+'</td><td>'+esc(h.outcome)+(h.reason?" · "+esc(h.reason):"")+'</td><td>'+esc(h.staff_email)+'</td></tr>').join("")||'<tr><td colspan="5">No scans recorded yet.</td></tr>';
+ }catch(e){alert("Could not load admin data: "+(e.message||e));}
+ finally{$("refresh-admin").disabled=false;}
 }
-async function signOut(){
-  await stopCamera();if(session){try{await bridgeRequest("logout",{token:session.token});}catch(e){}}
-  session=null;sessionStorage.removeItem("xspaceScannerSession");$("scanner-panel").hidden=true;$("login-panel").hidden=false;
-}
-
-async function detectCameras(){
-  const select=$("camera-select");
-  if(!window.Html5Qrcode){select.innerHTML="<option value=''>Scanner library unavailable</option>";return;}
-  try{
-    // A short permission request allows Android Chrome to reveal camera labels.
-    const stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:"environment"}}});
-    stream.getTracks().forEach(track=>track.stop());
-    cameras=await Html5Qrcode.getCameras();
-    select.innerHTML="";
-    if(!cameras.length){select.add(new Option("No camera detected",""));select.disabled=true;return;}
-    cameras.forEach((camera,index)=>select.add(new Option(camera.label||("Camera "+(index+1)),camera.id)));
-    const rear=cameras.find(c=>/back|rear|environment|world/i.test(c.label||""));
-    select.value=(rear||cameras[cameras.length-1]).id;select.disabled=false;
-    setStatus("Camera permission granted. Select the rear camera if needed, then start scanning.");
-  }catch(e){
-    select.innerHTML="<option value=''>Camera detection unavailable</option>";select.disabled=true;
-    setStatus("Could not detect cameras: "+(e.message||e)+". Check Android and Chrome camera permissions.", "error");
-  }
-}
+function esc(v){return String(v??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+function date(v){return v?new Date(v).toLocaleString():"—";}
 async function startCamera(){
-  if(!session)return;
-  if(!window.Html5Qrcode){setStatus("Scanner library could not load. Check internet access and reload.","error");return;}
-  if(!window.isSecureContext || !navigator.mediaDevices?.getUserMedia){setStatus("Camera access requires HTTPS and a supported browser.","error");return;}
-  $("start-button").disabled=true;
-  try{
-    if(!cameras.length) await detectCameras();
-    cameras=await Html5Qrcode.getCameras();
-    if(!cameras.length)throw new Error("No camera was found. Check Android camera access.");
-    const selected=$("camera-select").value;
-    const cameraId=selected||((cameras.find(c=>/back|rear|environment|world/i.test(c.label||""))||cameras[cameras.length-1]).id);
-    qr=new Html5Qrcode("reader");
-    await qr.start(cameraId,{fps:10,qrbox:{width:250,height:250}},decoded=>{
-      if(scanBusy || (decoded===lastCode && Date.now()-lastAt<1800))return;
-      lastCode=decoded;lastAt=Date.now();scanBusy=true;
-      validateTicket(decoded).finally(()=>setTimeout(()=>scanBusy=false,1200));
-    });
-    cameraOn=true;$("stop-button").hidden=false;$("camera-select").disabled=true;
-    setStatus("Camera active. Point it at the ticket QR code.");
-  }catch(e){
-    $("start-button").disabled=false;
-    setStatus("Camera could not start: "+(e.message||e)+". Try selecting another camera, then press start again.","error");
-    if(qr){try{await qr.clear();}catch(_){}qr=null;}
-  }
+ if(!profile)return;
+ if(!window.isSecureContext||!navigator.mediaDevices?.getUserMedia){message("scan-result","Camera scanning requires HTTPS and browser camera permission.","error");return;}
+ $("start-camera").disabled=true;
+ try{
+  cameras=await Html5Qrcode.getCameras();if(!cameras.length)throw new Error("No camera detected.");
+  const sel=$("camera-select");sel.innerHTML="";cameras.forEach((c,i)=>sel.add(new Option(c.label||("Camera "+(i+1)),c.id)));
+  const rear=cameras.find(c=>/back|rear|environment|world/i.test(c.label||""))||cameras[cameras.length-1];sel.value=rear.id;sel.disabled=false;
+  scanner=new Html5Qrcode("reader");
+  await scanner.start(sel.value,{fps:10,qrbox:{width:250,height:250}},value=>{
+   if(scanBusy||(value===lastValue&&Date.now()-lastAt<1800))return;
+   lastValue=value;lastAt=Date.now();scanBusy=true;processScan(value).finally(()=>setTimeout(()=>scanBusy=false,1000));
+  });
+  cameraOn=true;$("stop-camera").hidden=false;sel.disabled=true;message("scan-result","Camera active. Scan a ticket QR code.");
+ }catch(e){$("start-camera").disabled=false;message("scan-result",e.message||"Unable to start camera.","error");}
 }
-async function stopCamera(){
-  if(qr&&cameraOn){try{await qr.stop();await qr.clear();}catch(e){}}
-  qr=null;cameraOn=false;$("stop-button").hidden=true;$("start-button").disabled=false;$("camera-select").disabled=false;
+async function stopCamera(){if(scanner&&cameraOn){try{await scanner.stop();await scanner.clear();}catch(e){}}scanner=null;cameraOn=false;$("stop-camera").hidden=true;$("start-camera").disabled=false;$("camera-select").disabled=false;}
+async function processScan(value){
+ message("scan-result","Validating ticket…");
+ try{
+  const {data,error}=await supabase.rpc("process_ticket_scan",{p_qr_value:value});if(error)throw error;
+  const good=data.outcome==="ACCEPTED";message("scan-result",data.message+(data.ticket_id?" · "+data.ticket_id:""),good?"success":"error");
+ }catch(e){message("scan-result",e.message||"Scan failed. Check connection and sign-in.","error");}
 }
-async function validateTicket(code){
-  setStatus("Checking ticket…");
-  try{const result=await bridgeRequest("scanTicket",{token:session.token,qr:code});setStatus((result.message||result.result)+" · Ticket "+(result.ticketId||""),result.result==="ACCEPTED"?"success":"error");}
-  catch(e){setStatus(e.message||String(e),"error");}
-}
-function manualScan(){
-  const value=$("manual-qr").value.trim();if(!value)return setStatus("Enter a QR value first.","error");
-  if(scanBusy)return;scanBusy=true;validateTicket(value).finally(()=>{scanBusy=false;$("manual-qr").value="";});
-}
-$("login-button").addEventListener("click",signIn);
-$("start-button").addEventListener("click",startCamera);
-$("stop-button").addEventListener("click",stopCamera);
-$("logout-button").addEventListener("click",signOut);
-$("manual-button").addEventListener("click",manualScan);
-$("camera-select").addEventListener("change",()=>{if(cameraOn)stopCamera();});
-$("pin").addEventListener("keydown",e=>{if(e.key==="Enter")signIn();});
-try{const restored=JSON.parse(sessionStorage.getItem("xspaceScannerSession")||"null");if(restored&&restored.token&&["ENTRY","EXIT"].includes(restored.role)){session=restored;renderSession();}}catch(e){sessionStorage.removeItem("xspaceScannerSession");}
+function manual(){const v=$("manual-qr").value.trim();if(!v)return message("scan-result","Enter a QR value first.","error");if(scanBusy)return;scanBusy=true;processScan(v).finally(()=>{scanBusy=false;$("manual-qr").value="";});}
+$("login-button").addEventListener("click",signIn);$("admin-logout").addEventListener("click",signOut);$("staff-logout").addEventListener("click",signOut);
+$("refresh-admin").addEventListener("click",loadAdmin);$("start-camera").addEventListener("click",startCamera);$("stop-camera").addEventListener("click",stopCamera);$("manual-submit").addEventListener("click",manual);
+$("password").addEventListener("keydown",e=>{if(e.key==="Enter")signIn();});
