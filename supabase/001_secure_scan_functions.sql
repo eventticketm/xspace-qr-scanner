@@ -167,3 +167,64 @@ $$;
 
 revoke all on function public.admin_recent_scan_history(integer) from public, anon;
 grant execute on function public.admin_recent_scan_history(integer) to authenticated;
+
+
+create or replace function public.current_staff_profile()
+returns jsonb
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_profile public.staff_profiles%rowtype;
+begin
+  if auth.uid() is null then
+    raise exception 'AUTHENTICATION_REQUIRED';
+  end if;
+  select * into v_profile
+  from public.staff_profiles
+  where user_id = auth.uid();
+
+  if not found or v_profile.is_active is distinct from true then
+    raise exception 'STAFF_NOT_ACTIVE';
+  end if;
+
+  return jsonb_build_object(
+    'user_id', v_profile.user_id,
+    'email', v_profile.email,
+    'full_name', v_profile.full_name,
+    'role', v_profile.role,
+    'is_active', v_profile.is_active
+  );
+end;
+$$;
+
+revoke all on function public.current_staff_profile() from public, anon;
+grant execute on function public.current_staff_profile() to authenticated;
+
+create or replace function public.admin_ticket_list(p_limit integer default 300)
+returns table (ticket_id text, qr_value text, status text, updated_at timestamptz)
+language plpgsql
+security definer
+set search_path = ''
+as $$
+declare
+  v_user_id uuid := auth.uid();
+  v_role text;
+  v_active boolean;
+begin
+  select sp.role, sp.is_active into v_role, v_active
+  from public.staff_profiles sp where sp.user_id = v_user_id;
+  if v_user_id is null or v_role <> 'ADMIN' or v_active is distinct from true then
+    raise exception 'ADMIN_NOT_AUTHORISED';
+  end if;
+  return query
+  select t.ticket_id, t.qr_value, t.status, t.updated_at
+  from public.tickets t
+  order by t.ticket_id
+  limit greatest(1, least(coalesce(p_limit,300),1000));
+end;
+$$;
+
+revoke all on function public.admin_ticket_list(integer) from public, anon;
+grant execute on function public.admin_ticket_list(integer) to authenticated;
